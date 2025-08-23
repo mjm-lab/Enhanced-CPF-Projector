@@ -2,5 +2,3 @@ streamlit
 pandas
 numpy
 altair
-reportlab
-vl-convert-python
