@@ -2,6 +2,7 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 import altair as alt
+from dateutil.relativedelta import relativedelta
 
 # ==============================
 # Aesthetics & Page Config
@@ -65,7 +66,9 @@ EXTRA_55_PLUS = {
 
 
 def ow_ceiling_monthly(year: int):
-    if year <= 2024:
+    if year <= 2023:
+        return 6300.0
+    elif year == 2024:
         return 6800.0
     elif year == 2025:
         return 7400.0
@@ -133,9 +136,14 @@ def _label_year_age(y, yearly_df):
     except KeyError:
         return str(y)
 
-def age_at(dob: date, year: int, month: int):
-    d = date(year, month, 28)  # approx month-end
-    return d.year - dob.year - ((d.month, d.day) < (dob.month, d.day))
+from datetime import date
+import calendar
+
+def age_at(dob: date, year: int, month: int) -> int:
+    # Get month-end by moving to 1st of next month, subtract 1 day
+    d = date(year, month, 1) + relativedelta(months=1, days=-1)
+    return relativedelta(d, dob).years
+
 
 def get_alloc_for_age(age):
     for row in [
@@ -233,19 +241,27 @@ def compute_extra_interest_distribution(age, oa, sa, ma, ra):
             ei["MA"] += take_ma * EXTRA_BELOW_55["tier1_rate"]
             remaining -= take_ma
     else:
-        t1 = 30000.0; t2 = 30000.0
-        oa_cap = 20000.0
+        t1 = EXTRA_55_PLUS["tier1_amount"]
+        t2 = EXTRA_55_PLUS["tier2_amount"]
+        oa_cap = EXTRA_55_PLUS["oa_cap"]
         r1 = min(t1, ra); t1 -= r1
         o1 = min(t1, min(oa, oa_cap)); t1 -= o1
         s1 = min(t1, sa); t1 -= s1
         m1 = min(t1, ma); t1 -= m1
-        ei["RA"] += r1 * 0.02; ei["OA"] += o1 * 0.02; ei["SA"] += s1 * 0.02; ei["MA"] += m1 * 0.02
+        ei["RA"] += r1 * EXTRA_55_PLUS["tier1_rate"]
+        ei["OA"] += o1 * EXTRA_55_PLUS["tier1_rate"]
+        ei["SA"] += s1 * EXTRA_55_PLUS["tier1_rate"]
+        ei["MA"] += m1 * EXTRA_55_PLUS["tier1_rate"]
+
 
         r2 = min(t2, max(0.0, ra - r1)); t2 -= r2
         o2 = min(t2, max(0.0, min(oa, oa_cap) - o1)); t2 -= o2
         s2 = min(t2, max(0.0, sa - s1)); t2 -= s2
         m2 = min(t2, max(0.0, ma - m1)); t2 -= m2
-        ei["RA"] += r2 * 0.01; ei["OA"] += o2 * 0.01; ei["SA"] += s2 * 0.01; ei["MA"] += m2 * 0.01
+        ei["RA"] += r2 * EXTRA_55_PLUS["tier2_rate"]
+        ei["OA"] += o2 * EXTRA_55_PLUS["tier2_rate"]
+        ei["SA"] += s2 * EXTRA_55_PLUS["tier2_rate"]
+        ei["MA"] += m2 * EXTRA_55_PLUS["tier2_rate"]
     return ei
 
 def spill_from_ma(age, ma_end, bhs, sa, oa, ra, frs_for_cohort, ra_capital):
@@ -418,12 +434,17 @@ def project(
     ip_ward: str | None = None,
     ip_base_plan: str | None = "(None)",
     ip_rider: str | None = "(None)",
-    insurance_month: int = 1,   # <-- single month for MSHL & IP
+    insurance_month: int = 1,  
+    use_oa_for_ip_cash_after_retirement: bool = False,
+    apply_ip_premium_inflation: bool = False,
+    ip_premium_inflation_pct: float = 0.0,
+    ip_inflation_base_year: int = 0,
+
     # OA withdrawal (A)
     withdraw_oa_enabled: bool = False,
     withdraw_oa_monthly_amount: float = 0.0,
-    withdraw_oa_start_age: int = 55,
-    withdraw_oa_end_age: int = 120,
+    withdraw_oa_start_age: int = 60,
+    withdraw_oa_end_age: int = 90,
     inflation_pct: float = 0.02,
     withdraw_oa_inflate: bool = False,
     withdraw_oa_monthly_today: float = 0.0,
@@ -432,8 +453,8 @@ def project(
     # OA withdrawal (B)  
     withdraw_oa2_enabled: bool = False,
     withdraw_oa2_monthly_amount: float = 0.0,
-    withdraw_oa2_start_age: int = 55,
-    withdraw_oa2_end_age: int = 120,
+    withdraw_oa2_start_age: int = 65,
+    withdraw_oa2_end_age: int = 95,
     withdraw_oa2_inflate: bool = False,
     withdraw_oa2_monthly_today: float = 0.0,
     oa_withdrawal2_fv_at_start_year: float = 0.0,
@@ -441,20 +462,53 @@ def project(
     # Housing loan (OA monthly)
     house_enabled: bool = False,
     house_monthly_amount: float = 0.0,
-    house_end_age: int = 120,
+    house_end_age: int = 60,
     opening_ra_capital: float | None = None,
+    
+    # --- new: other assets & withdrawals ---
+    cash_opening: float = 0.0,
+    cash_monthly_contrib: float = 0.0,
+    cash_rate_pct: float = 0.0,
+
+    inv_opening: float = 0.0,
+    inv_monthly_contrib: float = 0.0,
+    inv_return_pct: float = 0.0,
+
+    # cash withdrawals (A/B)
+    cashA_enabled: bool = False, cashA_monthly_amount: float = 0.0,
+    cashA_start_age: int = 60, cashA_end_age: int = 90,
+    cashA_inflate: bool = False, cashA_fv_at_start: float = 0.0,
+
+    cashB_enabled: bool = False, cashB_monthly_amount: float = 0.0,
+    cashB_start_age: int = 65, cashB_end_age: int = 95,
+    cashB_inflate: bool = False, cashB_fv_at_start: float = 0.0,
+
+    # investment withdrawals (A/B)
+    invA_enabled: bool = False, invA_monthly_amount: float = 0.0,
+    invA_start_age: int = 60, invA_end_age: int = 90,
+    invA_inflate: bool = False, invA_fv_at_start: float = 0.0,
+
+    invB_enabled: bool = False, invB_monthly_amount: float = 0.0,
+    invB_start_age: int = 65, invB_end_age: int = 95,
+    invB_inflate: bool = False, invB_fv_at_start: float = 0.0,
+
 ):
     dob = datetime.strptime(dob_str, "%Y-%m-%d").date()
     bal = opening_balances.copy()
-    # Use the FV computed in the UI (at first withdrawal birthday)
     oa_wd_base_at_start_year  = float(oa_withdrawal_fv_at_start_year or 0.0)
     oa_wd2_base_at_start_year = float(oa_withdrawal2_fv_at_start_year or 0.0) 
+    # Other assets state
+    cash = float(cash_opening)
+    invest = float(inv_opening)
+
+    cash_runs_out_age = cash_runs_out_year = cash_runs_out_month = None
+    invest_runs_out_age = invest_runs_out_year = invest_runs_out_month = None
 
 
     monthly_rows = []
     year55 = dob.year + 55
     cohort_frs = get_frs_for_cohort(year55, frs_growth_pct)
-    cohort_ers = cohort_frs * 2
+    cohort_ers = cohort_frs * ERS_FACTOR_DEFAULT
     desired_ra_opening_multiple = ers_factor
     ra_transfer_target = min(cohort_frs * desired_ra_opening_multiple, cohort_ers)
 
@@ -499,7 +553,7 @@ def project(
         ow_cap = ow_ceiling_monthly(year)
 
         prevailing_frs_year = get_frs_for_year(year, frs_growth_pct)
-        prevailing_ers_year = prevailing_frs_year * 2
+        prevailing_ers_year = prevailing_frs_year * ERS_FACTOR_DEFAULT
 
         ow_subject_per_mo = min(monthly_income_y, ow_cap)
         ow_used_ytd = 0.0  # for bonus cap
@@ -525,7 +579,7 @@ def project(
             # --- init per-month tracking vars (top-ups & lump-sum) ---
             # Regular top-ups
             topup_oa_applied = topup_sa_applied = topup_ra_applied = topup_ma_applied = 0.0
-            topup_oa_requested = topup_sa_requested = topup_ra_requested = topup_ma_requested = 0.0  # (kept for symmetry)
+            topup_oa_requested = topup_sa_requested = topup_ra_requested = topup_ma_requested = 0.0
 
             # Lump-sum top-ups
             lump_oa_applied = lump_sa_applied = lump_ra_applied = lump_ma_applied = 0.0
@@ -559,7 +613,7 @@ def project(
                 plan_map = {"Standard":"Standard_65","Escalating":"Escalating_65","Basic":"Basic_65"}
                 coeff = CPF_LIFE_COEFFS[coeff_key][plan_map[cpf_life_plan]]
                 payout_65 = coeff["a"] + coeff["b"] * ra_at_65_value
-                monthly_start_payout = payout_65 * ((1 + CPF_LIFE_DEFERRAL_PER_YEAR) ** (payout_start_age - 65))
+                monthly_start_payout = payout_65 * (1 + CPF_LIFE_DEFERRAL_PER_YEAR*(payout_start_age - 65))
 
                 # Premium deduction (moves RA to annuity pool; ra_capital stays unchanged)
                 if cpf_life_plan in ("Standard","Escalating"):
@@ -685,7 +739,7 @@ def project(
                 ltci_paid_this_month = min(bal["MA"], float(ltci_ma_premium))
                 bal["MA"] -= ltci_paid_this_month
 
-            # --- Integrated Shield Plan premiums (CSV) ---
+            # --- Integrated Shield Plan premiums (CSV) --- 
             ip_base_ma_paid = 0.0
             ip_base_cash = 0.0
             ip_rider_cash = 0.0
@@ -693,31 +747,68 @@ def project(
             ip_base_cash_nominal = 0.0
             ip_rider_cash_nominal = 0.0
 
+            # NEW: OA actually used for "cash" portions after retirement
+            ip_base_oa_paid = 0.0
+            ip_rider_oa_paid = 0.0
+
+            # Compute IP-only inflation factor for this YEAR
+            ip_infl_factor = 1.0
+            if apply_ip_premium_inflation:
+                years_from_base = max(0, int(year) - int(ip_inflation_base_year))
+                ip_infl_factor = (1.0 + float(ip_premium_inflation_pct)) ** years_from_base
+
             if ip_enabled and (ip_df is not None) and (month == insurance_month):
                 anb_ip = age + 1
 
                 # Base plan (MA + Cash)
                 if ip_base_plan and ip_base_plan != "(None)":
-                    base_ma, base_cash = _ip_lookup_amounts(
+                    # CSV gives the split at this ANB (this MA portion is the cap; DO NOT inflate it)
+                    base_ma_nominal, base_cash_nominal = _ip_lookup_amounts(
                         ip_df, ip_insurer, ip_ward, ip_base_plan, "Base", anb_ip
                     )
-                    ip_base_ma_nominal = base_ma
-                    ip_base_cash_nominal = base_cash
+                    ip_base_ma_nominal = base_ma_nominal           # keep nominal for your "intended source" charts
+                    ip_base_cash_nominal = base_cash_nominal
 
-                    if base_ma > 0:
-                        pay_ma = min(bal["MA"], base_ma)
+                    total_nominal = float(base_ma_nominal) + float(base_cash_nominal)
+                    total_due = total_nominal * ip_infl_factor     # inflate TOTAL premium only
+
+                    # MA payment cannot exceed (1) MA cap from CSV, (2) total premium due, (3) available MA
+                    ma_cap = float(base_ma_nominal)
+                    pay_ma = min(bal["MA"], ma_cap, total_due)
+                    if pay_ma > 0:
                         bal["MA"] -= pay_ma
                         ip_base_ma_paid = pay_ma
-                        ip_base_cash += max(0.0, base_ma - pay_ma)  # MA shortfall paid in cash
-                    ip_base_cash += base_cash  # plan's cash part
+
+                    # Remaining premium is "cash due"
+                    base_cash_due = total_due - pay_ma
+                    if base_cash_due > 0.0:
+                        if (age >= retirement_age) and bool(use_oa_for_ip_cash_after_retirement):
+                            pay_oa = min(bal["OA"], base_cash_due)
+                            if pay_oa > 0:
+                                bal["OA"] -= pay_oa
+                                ip_base_oa_paid = pay_oa
+                            ip_base_cash += max(0.0, base_cash_due - pay_oa)
+                        else:
+                            ip_base_cash += base_cash_due
 
                 # Rider (cash only)
                 if ip_rider and ip_rider != "(None)":
-                    _, rider_cash = _ip_lookup_amounts(
+                    _, rider_cash_nominal = _ip_lookup_amounts(
                         ip_df, ip_insurer, ip_ward, ip_rider, "Rider", anb_ip
                     )
-                    ip_rider_cash_nominal = rider_cash
-                    ip_rider_cash += rider_cash
+                    ip_rider_cash_nominal = rider_cash_nominal     # keep nominal as-is
+                    rider_due = float(rider_cash_nominal) * ip_infl_factor
+
+                    if rider_due > 0.0:
+                        if (age >= retirement_age) and bool(use_oa_for_ip_cash_after_retirement):
+                            pay_oa = min(bal["OA"], rider_due)
+                            if pay_oa > 0:
+                                bal["OA"] -= pay_oa
+                                ip_rider_oa_paid = pay_oa
+                            ip_rider_cash += max(0.0, rider_due - pay_oa)
+                        else:
+                            ip_rider_cash += rider_due
+
 
 
             if month == m_topup_month:
@@ -863,8 +954,37 @@ def project(
                 if (house_runs_out_age is None) and (bal["OA"] <= 1e-6):
                     house_runs_out_age = int(age)
                     house_runs_out_year = int(year)
-                    house_runs_out_month = int(month)
+                    house_runs_out_month = int(month)         
+                    
+            # --- CPF LIFE payouts (Basic only draws from RA savings) ---
+            monthly_cpf_payout = 0.0
+            cpf_ra_draw_this_month = 0.0
+            if include_cpf_life and cpf_life_started:
+                years_since_start = (year - start_year_sched) if start_year_sched is not None else 0
+                current_monthly_payout = monthly_start_payout
+                if cpf_life_plan == "Escalating" and years_since_start > 0:
+                    current_monthly_payout *= ((1 + ESCALATING_RATE) ** years_since_start)
+                monthly_cpf_payout = current_monthly_payout
+                if cpf_life_plan == "Basic":
+                    draw = min(bal["RA"], monthly_cpf_payout)
+                    bal["RA"] -= draw
+                    cpf_ra_draw_this_month = draw
+                    # (ra_capital unchanged by draw)
 
+            # --- Enforce BHS and spillovers ---
+            ra_before = bal["RA"]
+            bal["MA"], bal["SA"], bal["OA"], bal["RA"] = spill_from_ma(
+                age, bal["MA"], bhs_this_year, bal["SA"], bal["OA"], bal["RA"], cohort_frs, ra_capital
+            )
+            ra_spill = max(0.0, bal["RA"] - ra_before)
+            ra_capital += ra_spill  # MA->RA spill counts as capital
+
+            # Ensure SA closed after 55
+            if age >= 55 and bal["SA"] > 0:
+                bal["RA"] += bal["SA"]; bal["SA"] = 0.0
+                # (moving SA->RA here does not add to ra_capital; only transfers/contri/spills do)
+
+        
             # --- Monthly interest ACCRUAL (computed on previous month-end balances) ---
             base_int_OA = prev_bal_for_interest.get("OA", 0.0) * (BASE_INT["OA"] / 12.0)
             base_int_SA_raw = prev_bal_for_interest.get("SA", 0.0) * (BASE_INT["SA"] / 12.0)
@@ -908,32 +1028,6 @@ def project(
                 accr_extra_to_RA_from_RA += (ei["RA"] / 12.0)
                 # MA extra stays with MA
                 accr_extra_to_MA += (ei["MA"] / 12.0)
-
-            # --- CPF LIFE payouts (Basic only draws from RA savings) ---
-            monthly_cpf_payout = 0.0
-            if include_cpf_life and cpf_life_started:
-                years_since_start = (year - start_year_sched) if start_year_sched is not None else 0
-                current_monthly_payout = monthly_start_payout
-                if cpf_life_plan == "Escalating" and years_since_start > 0:
-                    current_monthly_payout *= ((1 + ESCALATING_RATE) ** years_since_start)
-                monthly_cpf_payout = current_monthly_payout
-                if cpf_life_plan == "Basic":
-                    draw = min(bal["RA"], monthly_cpf_payout)
-                    bal["RA"] -= draw
-                    # (ra_capital unchanged by draw)
-
-            # --- Enforce BHS and spillovers ---
-            ra_before = bal["RA"]
-            bal["MA"], bal["SA"], bal["OA"], bal["RA"] = spill_from_ma(
-                age, bal["MA"], bhs_this_year, bal["SA"], bal["OA"], bal["RA"], cohort_frs, ra_capital
-            )
-            ra_spill = max(0.0, bal["RA"] - ra_before)
-            ra_capital += ra_spill  # MA->RA spill counts as capital
-
-            # Ensure SA closed after 55
-            if age >= 55 and bal["SA"] > 0:
-                bal["RA"] += bal["SA"]; bal["SA"] = 0.0
-                # (moving SA->RA here does not add to ra_capital; only transfers/contri/spills do)
 
 
             # --- Save monthly row OR (in December) save it AFTER year-end interest credit ---
@@ -984,6 +1078,78 @@ def project(
                 accr_base_to_RA_from_RA = accr_base_to_RA_from_SA = 0.0
                 accr_extra_to_SA = accr_extra_to_MA = 0.0
                 accr_extra_to_RA_from_RA = accr_extra_to_RA_from_OA = accr_extra_to_RA_from_SA = 0.0
+                
+                
+            # Contributions to cash/invest (example: only while working)
+            if working:
+                cash += float(cash_monthly_contrib)
+                invest += float(inv_monthly_contrib)
+                
+            # ---------- Cash withdrawals (A & B) ----------
+            cash_withdrawalA_paid = 0.0
+            cash_withdrawalB_paid = 0.0
+
+            def _inflated_amt_at_generic(year, month, start_age, base_fv_at_start):
+                withdraw_start_year = dob.year + int(start_age)
+                years_since_first_withdraw_bday = (year - withdraw_start_year) - (1 if month < dob.month else 0)
+                years_since_first_withdraw_bday = max(0, years_since_first_withdraw_bday)
+                return base_fv_at_start * ((1 + float(inflation_pct)) ** years_since_first_withdraw_bday)
+
+            if cashA_enabled and (age >= int(cashA_start_age)) and (age <= int(cashA_end_age)):
+                amt = (_inflated_amt_at_generic(year, month, cashA_start_age, cashA_fv_at_start)
+                       if (cashA_inflate and cashA_fv_at_start > 0) else float(cashA_monthly_amount))
+                if amt > 0:
+                    pay = min(cash, amt)
+                    cash -= pay
+                    cash_withdrawalA_paid = pay
+                    if (cash_runs_out_age is None) and (cash <= 1e-6):
+                        cash_runs_out_age, cash_runs_out_year, cash_runs_out_month = int(age), int(year), int(month)
+
+            if cashB_enabled and (age >= int(cashB_start_age)) and (age <= int(cashB_end_age)):
+                amt = (_inflated_amt_at_generic(year, month, cashB_start_age, cashB_fv_at_start)
+                       if (cashB_inflate and cashB_fv_at_start > 0) else float(cashB_monthly_amount))
+                if amt > 0:
+                    pay = min(cash, amt)
+                    cash -= pay
+                    cash_withdrawalB_paid = pay
+                    if (cash_runs_out_age is None) and (cash <= 1e-6):
+                        cash_runs_out_age, cash_runs_out_year, cash_runs_out_month = int(age), int(year), int(month)
+
+            cash_withdrawal_paid = cash_withdrawalA_paid + cash_withdrawalB_paid
+
+            # ---------- Investment withdrawals (A & B) ----------
+            invest_withdrawalA_paid = 0.0
+            invest_withdrawalB_paid = 0.0
+
+            if invA_enabled and (age >= int(invA_start_age)) and (age <= int(invA_end_age)):
+                amt = (_inflated_amt_at_generic(year, month, invA_start_age, invA_fv_at_start)
+                       if (invA_inflate and invA_fv_at_start > 0) else float(invA_monthly_amount))
+                if amt > 0:
+                    pay = min(invest, amt)
+                    invest -= pay
+                    invest_withdrawalA_paid = pay
+                    if (invest_runs_out_age is None) and (invest <= 1e-6):
+                        invest_runs_out_age, invest_runs_out_year, invest_runs_out_month = int(age), int(year), int(month)
+
+            if invB_enabled and (age >= int(invB_start_age)) and (age <= int(invB_end_age)):
+                amt = (_inflated_amt_at_generic(year, month, invB_start_age, invB_fv_at_start)
+                       if (invB_inflate and invB_fv_at_start > 0) else float(invB_monthly_amount))
+                if amt > 0:
+                    pay = min(invest, amt)
+                    invest -= pay
+                    invest_withdrawalB_paid = pay
+                    if (invest_runs_out_age is None) and (invest <= 1e-6):
+                        invest_runs_out_age, invest_runs_out_year, invest_runs_out_month = int(age), int(year), int(month)
+
+            invest_withdrawal_paid = invest_withdrawalA_paid + invest_withdrawalB_paid
+
+                
+            # Monthly growth
+            if cash > 0:
+                cash += cash * (float(cash_rate_pct) / 12.0)
+            if invest > 0:
+                invest += invest * (float(inv_return_pct) / 12.0)
+
 
             # Now record the month (Dec row will already include the credited interest)
             monthly_rows.append({
@@ -995,7 +1161,7 @@ def project(
                 "BaseInt_OA": base_int_OA, "BaseInt_SA": base_int_SA_raw, "BaseInt_MA": base_int_MA, "BaseInt_RA": base_int_RA,
                 "ExtraInt_OA": ei["OA"]/12.0, "ExtraInt_SA": ei["SA"]/12.0, "ExtraInt_MA": ei["MA"]/12.0, "ExtraInt_RA": ei["RA"]/12.0,
                 "RA_capital": ra_capital, "Prevailing_ERS": prevailing_ers_year,
-                "CPF_LIFE_started": int(cpf_life_started), "CPF_LIFE_monthly_payout": monthly_cpf_payout,
+                "CPF_LIFE_started": int(cpf_life_started), "CPF_LIFE_monthly_payout": monthly_cpf_payout, "CPF_LIFE_RA_Draw": cpf_ra_draw_this_month,
 
                 # Insurance flows
                 "MSHL_Premium_Paid": mshl_paid_this_month,
@@ -1013,6 +1179,9 @@ def project(
                 "IP_Base_MA_Nominal": ip_base_ma_nominal,
                 "IP_Base_Cash_Nominal": ip_base_cash_nominal,
                 "IP_Rider_Cash_Nominal": ip_rider_cash_nominal,
+                "IP_Base_OA_Paid": ip_base_oa_paid,
+                "IP_Rider_OA_Paid": ip_rider_oa_paid,
+
 
                 # Top-ups actually applied this month
                 "Topup_OA_Applied": topup_oa_applied,
@@ -1042,11 +1211,19 @@ def project(
                 "OA_Withdrawal1_Paid": oa_withdrawal1_paid,
                 "OA_Withdrawal2_Paid": oa_withdrawal2_paid,
                 "Housing_OA_Paid": house_paid_this_month,
+                
+                "Cash": cash, "Invest": invest,
+                "Cash_Withdrawal_Paid": cash_withdrawal_paid,
+                "Cash_Withdrawal_A_Paid": cash_withdrawalA_paid,
+                "Cash_Withdrawal_B_Paid": cash_withdrawalB_paid,
+                "Invest_Withdrawal_Paid": invest_withdrawal_paid,
+                "Invest_Withdrawal_A_Paid": invest_withdrawalA_paid,
+                "Invest_Withdrawal_B_Paid": invest_withdrawalB_paid,
+
 
             })
 
             # Set next month's accrual base to month-end balances
-            # (post-credit balances for December)
             prev_bal_for_interest = {
                 "OA": bal["OA"], "SA": bal["SA"], "MA": bal["MA"], "RA": bal["RA"]
             }
@@ -1083,6 +1260,13 @@ def project(
             "IP_Base_MA_Nominal_Annual": grp["IP_Base_MA_Nominal"].sum(),
             "IP_Base_Cash_Nominal_Annual": grp["IP_Base_Cash_Nominal"].sum(),
             "IP_Rider_Cash_Nominal_Annual": grp["IP_Rider_Cash_Nominal"].sum(),
+            "IP_Base_OA_Annual": grp["IP_Base_OA_Paid"].sum() if "IP_Base_OA_Paid" in grp.columns else 0.0,
+            "IP_Rider_OA_Annual": grp["IP_Rider_OA_Paid"].sum() if "IP_Rider_OA_Paid" in grp.columns else 0.0,
+            "Health_OA_Annual": (
+                (grp["IP_Base_OA_Paid"].sum() if "IP_Base_OA_Paid" in grp.columns else 0.0) +
+                (grp["IP_Rider_OA_Paid"].sum() if "IP_Rider_OA_Paid" in grp.columns else 0.0)
+            ),
+
 
             # Top-up annual totals
             "Topup_OA_Annual": grp["Topup_OA_Applied"].sum(),
@@ -1103,14 +1287,31 @@ def project(
             "OA_Withdrawal_B_Annual": grp["OA_Withdrawal2_Paid"].sum(),
 
             "Housing_OA_Annual": grp["Housing_OA_Paid"].sum(),
+            
+            "End_Cash": float(end_row.get("Cash", 0.0)),
+            "End_Invest": float(end_row.get("Invest", 0.0)),
+            "Total_Assets": float(end_row["OA"] + end_row["SA"] + end_row["MA"] + end_row["RA"]
+                      + float(end_row.get("Cash", 0.0)) + float(end_row.get("Invest", 0.0))),
+
+
+            # Annual withdrawals
+            "Cash_Withdrawal_A_Annual": grp["Cash_Withdrawal_A_Paid"].sum(),
+            "Cash_Withdrawal_B_Annual": grp["Cash_Withdrawal_B_Paid"].sum(),
+            "Cash_Withdrawal_Annual": grp["Cash_Withdrawal_Paid"].sum(),
+
+            "Invest_Withdrawal_A_Annual": grp["Invest_Withdrawal_A_Paid"].sum(),
+            "Invest_Withdrawal_B_Annual": grp["Invest_Withdrawal_B_Paid"].sum(),
+            "Invest_Withdrawal_Annual": grp["Invest_Withdrawal_Paid"].sum(),
+
         })
     yearly_df = pd.DataFrame(yearly)
 
-    # ----- CPF LIFE payout schedule & bequest track -----
+   # ----- CPF LIFE payout schedule & bequest track -----
     cpf_life_df = None
     bequest_df = None
+
     if include_cpf_life and ('monthly_start_payout' in locals()) and (monthly_start_payout is not None):
-        # Determine start year calendar
+        # Find the calendar start year of payouts
         psa_rows = monthly_df[(monthly_df["Age"] == payout_start_age) & (monthly_df["Month"] == psa_month)]
         if not psa_rows.empty:
             start_year_sched = int(psa_rows.iloc[0]["Year"])
@@ -1121,48 +1322,62 @@ def project(
         sched = []
         beq_rows = []
 
-        beq_premium = float(premium_pool)  # premium (no credited interest)
-        beq_ra_savings = float(ra_savings_for_basic if cpf_life_plan == "Basic" else 0.0)
-
-        def _annual_ra_interest(balance: float) -> float:
-            if balance <= 0:
-                return 0.0
-            base = balance * 0.04
-            tier1 = min(balance, 30000.0) * 0.02
-            tier2 = min(max(balance - 30000.0, 0.0), 30000.0) * 0.01
-            return base + tier1 + tier2
-
+        # Pool starts from premium moved at LIFE start (includes your RA-directed interest sweep if any)
+        beq_premium = float(premium_pool)
         last_year = int(yearly_df["Year"].max())
 
         for y in range(start_year_sched, last_year + 1):
-            years_since = y - start_year_sched
-            monthly = monthly_start_payout
-            if cpf_life_plan == "Escalating":
-                monthly *= ((1 + ESCALATING_RATE) ** max(0, years_since))
-            annual = monthly * 12.0
+            # Annual payout = sum of actual monthly payouts recorded by the engine
+            year_mask = (monthly_df["Year"] == y)
+            annual = float(monthly_df.loc[year_mask, "CPF_LIFE_monthly_payout"].sum())
+
+            # Representative monthly (use last month of the year)
+            if year_mask.any():
+                tail_row = monthly_df.loc[year_mask].sort_values(["Year", "Month"]).tail(1)
+                monthly = float(tail_row["CPF_LIFE_monthly_payout"].iloc[0])
+            else:
+                monthly = 0.0
 
             sched.append({"Year": y, "Monthly_Payout": monthly, "Annual_Payout": annual})
 
             if cpf_life_plan == "Basic":
-                # Basic: RA savings keep earning to member
-                beq_ra_savings += _annual_ra_interest(beq_ra_savings)
-                draw_from_ra = min(beq_ra_savings, annual)
-                beq_ra_savings -= draw_from_ra
-                from_pool = max(0.0, annual - draw_from_ra)
-                beq_premium = max(0.0, beq_premium - from_pool)
+                # Actual RA savings at year-end from the main engine
+                row_y = yearly_df.loc[yearly_df["Year"] == y]
+                ra_savings_remaining = float(row_y.iloc[0]["End_RA"]) if not row_y.empty else 0.0
+
+                # Portion of payout actually funded by RA (sum the draws you recorded)
+                ra_draw_year = float(
+                    monthly_df.loc[year_mask, "CPF_LIFE_RA_Draw"].sum()
+                    if "CPF_LIFE_RA_Draw" in monthly_df.columns else 0.0
+                )
+
+                # Remaining payout comes from the pool
+                pool_draw_year = max(0.0, annual - ra_draw_year)
+                beq_premium = max(0.0, beq_premium - pool_draw_year)
+
+                bequest_remaining = beq_premium + ra_savings_remaining
+
+                beq_rows.append({
+                    "Year": y,
+                    "Bequest_Remaining": bequest_remaining,
+                    "Unused_Premium": beq_premium,
+                    "RA_Savings_Remaining": ra_savings_remaining,
+                })
+
             else:
-                # Std/Esc: payouts entirely from pooled premium (no interest added)
+                # Standard / Escalating: payouts reduce the pool only (no interest added)
                 beq_premium = max(0.0, beq_premium - annual)
 
-            beq_rows.append({
-                "Year": y,
-                "Bequest_Remaining": beq_premium + beq_ra_savings,
-                "Unused_Premium": beq_premium,
-                "RA_Savings_Remaining": beq_ra_savings
-            })
+                beq_rows.append({
+                    "Year": y,
+                    "Bequest_Remaining": beq_premium,
+                    "Unused_Premium": beq_premium,
+                    "RA_Savings_Remaining": 0.0,
+                })
 
         cpf_life_df = pd.DataFrame(sched)
         bequest_df = pd.DataFrame(beq_rows)
+
 
     # meta & OA/housing run-out info
     meta = {
@@ -1208,6 +1423,33 @@ def project(
         "house_runs_out_year": house_runs_out_year,
         "house_runs_out_month": house_runs_out_month,
         "house_amount": float(house_monthly_amount),
+        
+        "cash_runs_out_age": cash_runs_out_age,
+        "cash_runs_out_year": cash_runs_out_year,
+        "cash_runs_out_month": cash_runs_out_month,
+
+        "invest_runs_out_age": invest_runs_out_age,
+        "invest_runs_out_year": invest_runs_out_year,
+        "invest_runs_out_month": invest_runs_out_month,
+
+        # Cash A/B ribbons
+        "cashA_enabled": bool(cashA_enabled), "cashA_inflate": bool(cashA_inflate),
+        "cashA_amount": float(cashA_monthly_amount), "cashA_start_age": int(cashA_start_age),
+        "cashA_end_age": int(cashA_end_age), "cashA_fv_start_year": float(cashA_fv_at_start),
+
+        "cashB_enabled": bool(cashB_enabled), "cashB_inflate": bool(cashB_inflate),
+        "cashB_amount": float(cashB_monthly_amount), "cashB_start_age": int(cashB_start_age),
+        "cashB_end_age": int(cashB_end_age), "cashB_fv_start_year": float(cashB_fv_at_start),
+
+        # Invest A/B ribbons
+        "invA_enabled": bool(invA_enabled), "invA_inflate": bool(invA_inflate),
+        "invA_amount": float(invA_monthly_amount), "invA_start_age": int(invA_start_age),
+        "invA_end_age": int(invA_end_age), "invA_fv_start_year": float(invA_fv_at_start),
+
+        "invB_enabled": bool(invB_enabled), "invB_inflate": bool(invB_inflate),
+        "invB_amount": float(invB_monthly_amount), "invB_start_age": int(invB_start_age),
+        "invB_end_age": int(invB_end_age), "invB_fv_start_year": float(invB_fv_at_start),
+
         
         "inflation_pct": float(inflation_pct),
     }
@@ -1344,8 +1586,25 @@ with st.sidebar:
     st.metric("Future value (S$)", f"{fv_result:,.2f}",
               help=f"Inflated for {_years_diff} year(s) (from {_today.year} to {_target_year}).")
 
-    
-    
+    # -----------------------------
+    # Other Assets (Cash & Invest)
+    # -----------------------------
+    st.markdown("---")
+    st.subheader("Other Assets")
+
+    # Cash savings
+    cash_opening = st.number_input("Starting Cash Saving (S$)", min_value=0.0, value=20000.0, step=500.0, format="%.2f")
+    cash_monthly_contrib = st.number_input("Monthly Cash Saving (S$)", min_value=0.0, value=500.0, step=50.0, format="%.2f")
+    cash_rate_pct = st.number_input("Cash Interest % p.a.", min_value=0.0, max_value=20.0, value=0.5, step=0.5, format="%.1f")/100
+
+    # Investments
+    inv_opening = st.number_input("Starting Investment Portfolio (S$)", min_value=0.0, value=50000.0, step=1000.0, format="%.2f")
+    inv_monthly_contrib = st.number_input("Monthly Investment Contribution (S$)", min_value=0.0, value=1000.0, step=50.0, format="%.2f")
+    inv_return_pct = st.number_input("Expected Return % p.a.", min_value=0.0, max_value=30.0, value=5.0, step=0.5, format="%.1f")/100
+
+    st.caption("Cash compounds at the bank rate; investments compound at your expected return. Contributions apply every month while working.")
+
+
 with st.expander("Regular top-ups", expanded=False):
     st.caption("Amounts apply once every calendar year in the selected month. SA top-ups only when SA < FRS (cohort). RA top-ups allowed up to prevailing ERS, based on capital (excludes RA interest).")
     colA, colB = st.columns(2)
@@ -1407,6 +1666,30 @@ with st.expander("Health Insurance (MSHL + Integrated Shield)", expanded=False):
     insurance_month = st.selectbox("Month to deduct health insurance premiums (MSHL & IP)", list(range(1,13)), index=0)
 
     ip_enabled = st.checkbox("Include Integrated Shield Plan premiums", value=False)
+    
+    # --- OA option for IP cash portions & IP-only inflation ---
+    use_oa_for_ip_cash_after_retirement = st.checkbox(
+        "After retirement, pay IP cash portions from OA",
+        value=False,
+        help="From your retirement age onward, try to pay IP Base 'cash' (incl. MA shortfall) and IP Rider from OA."
+    )
+
+    apply_ip_premium_inflation = st.checkbox(
+        "Apply IP premium inflation in projection", value=False
+    )
+    ip_premium_inflation_pct = st.number_input(
+        "IP premium inflation % p.a.",
+        min_value=0.0, max_value=20.0, value=2.0, step=0.5, format="%.1f",
+        disabled=not apply_ip_premium_inflation
+    ) / 100
+    ip_inflation_base_year = st.number_input(
+        "IP inflation base year",
+        min_value=int(start_year), max_value=int(start_year + years),
+        value=int(start_year), step=1,
+        disabled=not apply_ip_premium_inflation
+    )
+
+
     ip_upload = st.file_uploader("Upload IP premiums CSV", type=["csv"], help="Headers required: Insurer, Ward Class, Plan Type, Plan Name, Age, Premium in MA, Premium in Cash")
     ip_df, ip_load_msg = (None, None)
     ip_insurer = ip_ward = ip_base_plan = ip_rider = None
@@ -1546,8 +1829,6 @@ else:
 withdraw_oa2_monthly_today = 0.0
 
 
-
-
 with st.expander("CPF LIFE (payouts)", expanded=False):
     include_cpf_life = st.checkbox("Include CPF LIFE payouts in projection", value=True)
     cpf_life_plan = st.selectbox("Plan", ["Standard","Escalating","Basic"], index=0)
@@ -1562,6 +1843,82 @@ def _fingerprint_ip_df(ip_df):
     except Exception:
         return None
 
+    
+with st.expander("Cash Withdrawals", expanded=False):
+    # A
+    st.markdown("**Cash Schedule A**")
+    cashA_enabled = st.checkbox("Enable Cash A", value=False)
+    cashA_inflate = st.checkbox("Inflation-adjust Cash A", value=False, disabled=not cashA_enabled)
+    cA1, cA2, cA3 = st.columns(3)
+    with cA1:
+        cashA_monthly = st.number_input(" Cash A: Monthly (S$)", min_value=0.0, value=0.0, step=50.0, format="%.2f", disabled=not cashA_enabled)
+    with cA2:
+        cashA_start_age = st.number_input("Cash A: Start age", min_value=40, max_value=120, value=60, step=1, disabled=not cashA_enabled)
+    with cA3:
+        cashA_end_age = st.number_input("Cash A: End age", min_value=40, max_value=120, value=90, step=1, disabled=not cashA_enabled)
+
+    st.markdown("---")
+    # B
+    st.markdown("**Cash Schedule B**")
+    cashB_enabled = st.checkbox("Enable Cash B", value=False)
+    cashB_inflate = st.checkbox("Inflation-adjust Cash B", value=False, disabled=not cashB_enabled)
+    cB1, cB2, cB3 = st.columns(3)
+    with cB1:
+        cashB_monthly = st.number_input("Cash B: Monthly (S$)", min_value=0.0, value=0.0, step=50.0, format="%.2f", disabled=not cashB_enabled)
+    with cB2:
+        cashB_start_age = st.number_input("Cash B: Start age", min_value=40, max_value=120, value=65, step=1, disabled=not cashB_enabled)
+    with cB3:
+        cashB_end_age = st.number_input("Cash B: End age", min_value=40, max_value=120, value=95, step=1, disabled=not cashB_enabled)
+
+with st.expander("Investment Withdrawals", expanded=False):
+    # A
+    st.markdown("**Invest Schedule A**")
+    invA_enabled = st.checkbox("Enable Invest A", value=False)
+    invA_inflate = st.checkbox("Inflation-adjust Invest A", value=False, disabled=not invA_enabled)
+    iA1, iA2, iA3 = st.columns(3)
+    with iA1:
+        invA_monthly = st.number_input("Invest A: Monthly (S$)", min_value=0.0, value=0.0, step=50.0, format="%.2f", disabled=not invA_enabled)
+    with iA2:
+        invA_start_age = st.number_input("Invest A: Start age", min_value=40, max_value=120, value=60, step=1, disabled=not invA_enabled)
+    with iA3:
+        invA_end_age = st.number_input("Invest A: End age", min_value=40, max_value=120, value=90, step=1, disabled=not invA_enabled)
+
+    st.markdown("---")
+    # B
+    st.markdown("**Invest Schedule B**")
+    invB_enabled = st.checkbox("Enable Invest B", value=False)
+    invB_inflate = st.checkbox("Inflation-adjust Invest B", value=False, disabled=not invB_enabled)
+    iB1, iB2, iB3 = st.columns(3)
+    with iB1:
+        invB_monthly = st.number_input("Invest B: Monthly (S$)", min_value=0.0, value=0.0, step=50.0, format="%.2f", disabled=not invB_enabled)
+    with iB2:
+        invB_start_age = st.number_input("Invest B: Start age", min_value=40, max_value=120, value=65, step=1, disabled=not invB_enabled)
+    with iB3:
+        invB_end_age = st.number_input("Invest B: End age", min_value=40, max_value=120, value=95, step=1, disabled=not invB_enabled)
+
+# Cash and Invest A/B FV mapping
+if cashA_enabled and cashA_inflate:
+    cashA_fv_at_start = float(cashA_monthly); cashA_monthly_to_pass = 0.0
+else:
+    cashA_fv_at_start = 0.0; cashA_monthly_to_pass = float(cashA_monthly)
+
+if cashB_enabled and cashB_inflate:
+    cashB_fv_at_start = float(cashB_monthly); cashB_monthly_to_pass = 0.0
+else:
+    cashB_fv_at_start = 0.0; cashB_monthly_to_pass = float(cashB_monthly)
+
+# Invest A/B FV mapping
+if invA_enabled and invA_inflate:
+    invA_fv_at_start = float(invA_monthly); invA_monthly_to_pass = 0.0
+else:
+    invA_fv_at_start = 0.0; invA_monthly_to_pass = float(invA_monthly)
+
+if invB_enabled and invB_inflate:
+    invB_fv_at_start = float(invB_monthly); invB_monthly_to_pass = 0.0
+else:
+    invB_fv_at_start = 0.0; invB_monthly_to_pass = float(invB_monthly)
+
+    
 # bundle everything that actually affects the projection
 _input_key = {
     "name": name,
@@ -1613,6 +1970,11 @@ _input_key = {
     "ip_base_plan": None if not ip_enabled else str(ip_base_plan),
     "ip_rider": None if not ip_enabled else str(ip_rider),
     "insurance_month": int(insurance_month),
+    "use_oa_for_ip_cash_after_retirement": bool(use_oa_for_ip_cash_after_retirement),
+    "apply_ip_premium_inflation": bool(apply_ip_premium_inflation),
+    "ip_premium_inflation_pct": float(ip_premium_inflation_pct),
+    "ip_inflation_base_year": int(ip_inflation_base_year),
+
 
     # OA withdrawal
     "withdraw_oa_enabled": bool(withdraw_oa_enabled),
@@ -1640,6 +2002,34 @@ _input_key = {
     "include_cpf_life": bool(include_cpf_life),
     "cpf_life_plan": str(cpf_life_plan),
     "payout_start_age": int(payout_start_age),
+    
+    # cash/invest settings
+    "cash_opening": float(cash_opening),
+    "cash_monthly_contrib": float(cash_monthly_contrib),
+    "cash_rate_pct": float(cash_rate_pct),
+
+    "inv_opening": float(inv_opening),
+    "inv_monthly_contrib": float(inv_monthly_contrib),
+    "inv_return_pct": float(inv_return_pct),
+
+    # cash withdrawals
+    "cashA_enabled": bool(cashA_enabled), "cashA_monthly_to_pass": float(cashA_monthly_to_pass),
+    "cashA_start_age": int(cashA_start_age), "cashA_end_age": int(cashA_end_age),
+    "cashA_inflate": bool(cashA_inflate), "cashA_fv_at_start": float(cashA_fv_at_start),
+
+    "cashB_enabled": bool(cashB_enabled), "cashB_monthly_to_pass": float(cashB_monthly_to_pass),
+    "cashB_start_age": int(cashB_start_age), "cashB_end_age": int(cashB_end_age),
+    "cashB_inflate": bool(cashB_inflate), "cashB_fv_at_start": float(cashB_fv_at_start),
+
+    # invest withdrawals
+    "invA_enabled": bool(invA_enabled), "invA_monthly_to_pass": float(invA_monthly_to_pass),
+    "invA_start_age": int(invA_start_age), "invA_end_age": int(invA_end_age),
+    "invA_inflate": bool(invA_inflate), "invA_fv_at_start": float(invA_fv_at_start),
+
+    "invB_enabled": bool(invB_enabled), "invB_monthly_to_pass": float(invB_monthly_to_pass),
+    "invB_start_age": int(invB_start_age), "invB_end_age": int(invB_end_age),
+    "invB_inflate": bool(invB_inflate), "invB_fv_at_start": float(invB_fv_at_start),
+
 }
 
 _params_hash = hashlib.sha1(
@@ -1709,6 +2099,11 @@ if run_btn:
         ip_base_plan=ip_base_plan,
         ip_rider=ip_rider,
         insurance_month=int(insurance_month),
+        use_oa_for_ip_cash_after_retirement=bool(use_oa_for_ip_cash_after_retirement),
+        apply_ip_premium_inflation=bool(apply_ip_premium_inflation),
+        ip_premium_inflation_pct=float(ip_premium_inflation_pct),
+        ip_inflation_base_year=int(ip_inflation_base_year),
+
 
         # OA withdrawal (A)
         withdraw_oa_enabled=bool(withdraw_oa_enabled),
@@ -1736,6 +2131,33 @@ if run_btn:
         house_end_age=int(house_end_age),
 
         opening_ra_capital=float(opening_ra_capital),
+        
+        # Other assets
+        cash_opening=float(cash_opening),
+        cash_monthly_contrib=float(cash_monthly_contrib),
+        cash_rate_pct=float(cash_rate_pct),
+        inv_opening=float(inv_opening),
+        inv_monthly_contrib=float(inv_monthly_contrib),
+        inv_return_pct=float(inv_return_pct),
+
+        # Cash withdrawal schedules
+        cashA_enabled=bool(cashA_enabled), cashA_monthly_amount=float(cashA_monthly_to_pass),
+        cashA_start_age=int(cashA_start_age), cashA_end_age=int(cashA_end_age),
+        cashA_inflate=bool(cashA_inflate), cashA_fv_at_start=float(cashA_fv_at_start),
+
+        cashB_enabled=bool(cashB_enabled), cashB_monthly_amount=float(cashB_monthly_to_pass),
+        cashB_start_age=int(cashB_start_age), cashB_end_age=int(cashB_end_age),
+        cashB_inflate=bool(cashB_inflate), cashB_fv_at_start=float(cashB_fv_at_start),
+
+        # Investment withdrawal schedules
+        invA_enabled=bool(invA_enabled), invA_monthly_amount=float(invA_monthly_to_pass),
+        invA_start_age=int(invA_start_age), invA_end_age=int(invA_end_age),
+        invA_inflate=bool(invA_inflate), invA_fv_at_start=float(invA_fv_at_start),
+
+        invB_enabled=bool(invB_enabled), invB_monthly_amount=float(invB_monthly_to_pass),
+        invB_start_age=int(invB_start_age), invB_end_age=int(invB_end_age),
+        invB_inflate=bool(invB_inflate), invB_fv_at_start=float(invB_fv_at_start),
+
     )
     st.session_state.params_hash = _params_hash
     st.session_state.ran_once = True
@@ -1749,12 +2171,12 @@ settings_changed = (
 )
 
 if settings_changed:
-    # Nice little badge + explicit warning
-    st.markdown(
-        "<div class='pill' style='background:#fff7ed;color:#9a3412;"
-        "border:1px solid #fed7aa;'>Inputs changed since last run</div>",
-        unsafe_allow_html=True
-    )
+#    # Nice little badge + explicit warning
+#    st.markdown(
+#        "<div class='pill' style='background:#fff7ed;color:#9a3412;"
+#        "border:1px solid #fed7aa;'>Inputs changed since last run</div>",
+#        unsafe_allow_html=True
+#    )
     st.warning(
         "You’ve changed inputs since the last run. Click **Run Projection** to refresh the charts & tables."
     )
@@ -1910,6 +2332,53 @@ if meta.get("oaB_enabled"):
             f"Age {meta['oaB_start_age']}–{meta['oaB_end_age']}"
         )
 
+if meta.get("cashA_enabled"):
+    if meta.get("cashA_inflate"):
+        ribbons.append(
+            f"Cash withdrawal A - ${meta['cashA_fv_start_year']:,.0f}/mo, "
+            f"Age {meta['cashA_start_age']}–{meta['cashA_end_age']} @ {meta['inflation_pct']*100:.1f}% pa"
+        )
+    else:
+        ribbons.append(
+            f"Cash withdrawal A — ${meta['cashA_amount']:,.0f}/mo, "
+            f"Age {meta['cashA_start_age']}–{meta['cashA_end_age']}"
+        )
+
+if meta.get("cashB_enabled"):
+    if meta.get("cashB_inflate"):
+        ribbons.append(
+            f"Cash withdrawal B - ${meta['cashB_fv_start_year']:,.0f}/mo, "
+            f"Age {meta['cashB_start_age']}–{meta['cashB_end_age']} @ {meta['inflation_pct']*100:.1f}% pa"
+        )
+    else:
+        ribbons.append(
+            f"Cash withdrawal B — ${meta['cashB_amount']:,.0f}/mo, "
+            f"Age {meta['cashB_start_age']}–{meta['cashB_end_age']}"
+        )
+        
+if meta.get("invA_enabled"):
+    if meta.get("invA_inflate"):
+        ribbons.append(
+            f"Investment withdrawal A - ${meta['invA_fv_start_year']:,.0f}/mo, "
+            f"Age {meta['invA_start_age']}–{meta['invA_end_age']} @ {meta['inflation_pct']*100:.1f}% pa"
+        )
+    else:
+        ribbons.append(
+            f"Investment withdrawal A — ${meta['invA_amount']:,.0f}/mo, "
+            f"Age {meta['invA_start_age']}–{meta['invA_end_age']}"
+        )
+
+if meta.get("invB_enabled"):
+    if meta.get("invB_inflate"):
+        ribbons.append(
+            f"Investment withdrawal B - ${meta['invB_fv_start_year']:,.0f}/mo, "
+            f"Age {meta['invB_start_age']}–{meta['invB_end_age']} @ {meta['inflation_pct']*100:.1f}% pa"
+        )
+    else:
+        ribbons.append(
+            f"Investment withdrawal B — ${meta['invB_amount']:,.0f}/mo, "
+            f"Age {meta['invB_start_age']}–{meta['invB_end_age']}"
+        )
 
 if ribbons:
     html_ribbons = " ".join([f"<span class='pill'>{r}</span>" for r in ribbons])
@@ -1930,6 +2399,11 @@ if meta.get("oa_withdrawal_enabled") and (meta.get("oa_runs_out_age") is not Non
         f"(Year {meta['oa_runs_out_year']}) under your OA withdrawal settings."
     )
 
+if meta.get("cash_runs_out_age") is not None:
+    st.warning(f"Cash runs out at age {meta['cash_runs_out_age']} (Year {meta['cash_runs_out_year']}).")
+
+if meta.get("invest_runs_out_age") is not None:
+    st.warning(f"Investments run out at age {meta['invest_runs_out_age']} (Year {meta['invest_runs_out_year']}).")
 
 
 # ─────────────────────────────────────────────────────────
@@ -1998,12 +2472,10 @@ with st.expander("Preview allowance at a specific month", expanded=False):
         )
 
 # ---- Tabs layout ----
-tab_bal, tab_cpf, tab_cash, tab_health = st.tabs([
-    "Account Balances",
-    "CPF LIFE & Bequest",
-    "Cashflows",
-    "Health Insurance"
+tab_bal, tab_cpf, tab_cash, tab_health, tab_nw = st.tabs([
+    "CPF Account Balances", "CPF LIFE & Bequest", "Cashflows", "Health Insurance", "Net Worth"
 ])
+
 
 # ============= TAB 1: Account Balances =============
 with tab_bal:
@@ -2172,67 +2644,93 @@ with tab_cpf:
 
 # ============= TAB 3: Cashflows =============
 with tab_cash:
-    # ===== CASHFLOW CHARTS: CPF LIFE + OA A + OA B, plus TOTAL =====
-    st.markdown("### Cashflow: CPF LIFE + OA Withdrawal (Nominal)")
+   # ===== CASHFLOW CHARTS: CPF LIFE + OA A + OA B + Cash A/B + Inv A/B, plus TOTAL =====
+    st.markdown("### Cashflow: CPF LIFE + OA / Cash / Investment Withdrawals (Nominal)")
 
-    # Year-end (Dec) snapshot per year
+    # Take the last month in each year (usually Dec) as the representative monthly flow
     _snap = (
         monthly_df.sort_values(["Year", "Month"])
                   .groupby("Year", as_index=False)
-                  .tail(1)[["Year", "CPF_LIFE_monthly_payout", "OA_Withdrawal1_Paid", "OA_Withdrawal2_Paid"]]
+                  .tail(1)[[
+                      "Year",
+                      "CPF_LIFE_monthly_payout",
+                      "OA_Withdrawal1_Paid","OA_Withdrawal2_Paid",
+                      "Cash_Withdrawal_A_Paid","Cash_Withdrawal_B_Paid",
+                      "Invest_Withdrawal_A_Paid","Invest_Withdrawal_B_Paid"
+                  ]]
                   .copy()
     )
 
-    # Ensure columns exist even if zeros
-    for col in ["CPF_LIFE_monthly_payout", "OA_Withdrawal1_Paid", "OA_Withdrawal2_Paid"]:
-        if col not in _snap.columns:
-            _snap[col] = 0.0
+    # Give friendlier aliases (so we can melt/select easily)
+    _snap["CPF"]    = _snap["CPF_LIFE_monthly_payout"]
+    _snap["OA_A"]   = _snap["OA_Withdrawal1_Paid"]
+    _snap["OA_B"]   = _snap["OA_Withdrawal2_Paid"]
+    _snap["Cash_A"] = _snap["Cash_Withdrawal_A_Paid"]
+    _snap["Cash_B"] = _snap["Cash_Withdrawal_B_Paid"]
+    _snap["Inv_A"]  = _snap["Invest_Withdrawal_A_Paid"]
+    _snap["Inv_B"]  = _snap["Invest_Withdrawal_B_Paid"]
 
-    # X-axis label "YYYY (Age A)"
+    # X-axis label “YYYY (Age A)”
     _age_by_year = yearly_df.set_index("Year")["Age_end"].to_dict()
     _snap["YearAge"] = _snap["Year"].map(lambda y: f"{int(y)} (Age {int(_age_by_year.get(int(y), 0))})")
 
-    # Palette (consistent with your other charts)
-    COLOR_CPF   = "#6b7280"  # CPF LIFE (dashed)
-    COLOR_OA_A  = "#1f77b4"  # OA A
-    COLOR_OA_B  = "#9ecae1"  # OA B
-    COLOR_TOTAL = "#d62728"  # Total
-    LINE_W = 2
+    # Decide which lines to show (if a series is entirely zero, don’t show it)
+    def _present(col): 
+        return float(_snap[col].abs().sum()) > 1e-9
 
-    base_x = alt.X("YearAge:O", title="Year (Age)", sort=None, axis=alt.Axis(labelAngle=-40))
+    series_order = ["Total", "CPF", "OA_A", "OA_B", "Cash_A", "Cash_B", "Inv_A", "Inv_B"]
+    present_flags = {s: _present(s) if s != "Total" else True for s in series_order}
 
-    # ---------- NOMINAL ----------
-    _nom = _snap.copy()
-    _nom["CPF"]  = _nom["CPF_LIFE_monthly_payout"]
-    _nom["OA_A"] = _nom["OA_Withdrawal1_Paid"]
-    _nom["OA_B"] = _nom["OA_Withdrawal2_Paid"]
-    _nom["Total"] = _nom[["CPF", "OA_A", "OA_B"]].sum(axis=1)
+    # Build Total = CPF + OA_A + OA_B + Cash_A + Cash_B + Inv_A + Inv_B
+    _cols_for_total = [s for s in ["CPF","OA_A","OA_B","Cash_A","Cash_B","Inv_A","Inv_B"] if present_flags[s]]
+    _snap["Total"] = _snap[_cols_for_total].sum(axis=1) if _cols_for_total else 0.0
 
-    oaA_present = float(_nom["OA_A"].abs().sum()) > 1e-9
-    oaB_present = float(_nom["OA_B"].abs().sum()) > 1e-9
-
-    value_vars_nom = ["Total", "CPF"] + (["OA_A"] if oaA_present else []) + (["OA_B"] if oaB_present else [])
+    # Make a long format for Altair
+    value_vars_nom = [s for s in series_order if present_flags.get(s, False)]
     _nom_long = pd.melt(
-        _nom,
+        _snap,
         id_vars=["Year", "YearAge"],
         value_vars=value_vars_nom,
         var_name="Series",
         value_name="Amount",
     )
 
+    # Legend labels & color harmony with your existing scheme
     label_map_nom = {
         "Total": "Total (monthly)",
         "CPF":   "CPF LIFE (monthly)",
         "OA_A":  "OA A (monthly)",
         "OA_B":  "OA B (monthly)",
+        "Cash_A":"Cash A (monthly)",
+        "Cash_B":"Cash B (monthly)",
+        "Inv_A": "Invest A (monthly)",
+        "Inv_B": "Invest B (monthly)",
     }
     _nom_long["Label"] = _nom_long["Series"].map(label_map_nom)
 
-    legend_domain_nom = [label_map_nom[s] for s in value_vars_nom]
-    color_map_nom = {"Total": COLOR_TOTAL, "CPF": COLOR_CPF, "OA_A": COLOR_OA_A, "OA_B": COLOR_OA_B}
-    legend_range_nom = [color_map_nom[s] for s in value_vars_nom]
+    # Colors (keep CPF gray; reuse OA blues; add Cash teal; Inv purple; Total red)
+    COLOR_TOTAL = "#d62728"
+    COLOR_CPF   = "#6b7280"
+    COLOR_OA_A  = "#1f77b4"
+    COLOR_OA_B  = "#9ecae1"
+    COLOR_CASH_A= "#0ea5a8"
+    COLOR_CASH_B= "#99f6e4"
+    COLOR_INV_A = "#7c3aed"
+    COLOR_INV_B = "#c4b5fd"
 
-    # Area under Total ONLY
+    color_map_nom = {
+        "Total": COLOR_TOTAL, "CPF": COLOR_CPF,
+        "OA_A": COLOR_OA_A, "OA_B": COLOR_OA_B,
+        "Cash_A": COLOR_CASH_A, "Cash_B": COLOR_CASH_B,
+        "Inv_A": COLOR_INV_A, "Inv_B": COLOR_INV_B,
+    }
+    legend_domain_nom = [label_map_nom[s] for s in value_vars_nom]
+    legend_range_nom  = [color_map_nom[s] for s in value_vars_nom]
+
+    base_x = alt.X("YearAge:O", title="Year (Age)", sort=None, axis=alt.Axis(labelAngle=-40))
+    LINE_W = 2
+
+    # Area under Total
     nom_total_area = (
         alt.Chart(_nom_long[_nom_long["Series"] == "Total"])
           .mark_area(opacity=0.12)
@@ -2256,9 +2754,10 @@ with tab_cash:
           )
     )
 
-    # CPF LIFE line (dashed)
-    nom_cpf_line = (
-        alt.Chart(_nom_long[_nom_long["Series"] == "CPF"])
+    # All other components (dashed)
+    others = [s for s in value_vars_nom if s != "Total"]
+    nom_others = (
+        alt.Chart(_nom_long[_nom_long["Series"].isin(others)])
           .mark_line(point=True, strokeDash=[4, 2])
           .encode(
               x=base_x,
@@ -2269,68 +2768,31 @@ with tab_cash:
           )
     )
 
-    layers = nom_total_area + nom_total_line + nom_cpf_line
+    st.altair_chart((nom_total_area + nom_total_line + nom_others).properties(height=320, title="Nominal"),
+                    use_container_width=True)
 
-    if oaA_present:
-        layers = layers + (
-            alt.Chart(_nom_long[_nom_long["Series"] == "OA_A"])
-              .mark_line(point=True, strokeDash=[4, 2])
-              .encode(
-                  x=base_x,
-                  y=alt.Y("Amount:Q", title="Amount (S$)", axis=alt.Axis(format=",.0f")),
-                  color=alt.Color("Label:N", title="Component",
-                                  scale=alt.Scale(domain=legend_domain_nom, range=legend_range_nom)),
-                  strokeWidth=alt.value(LINE_W),
-              )
-        )
-
-    if oaB_present:
-        layers = layers + (
-            alt.Chart(_nom_long[_nom_long["Series"] == "OA_B"])
-              .mark_line(point=True, strokeDash=[4, 2])
-              .encode(
-                  x=base_x,
-                  y=alt.Y("Amount:Q", title="Amount (S$)", axis=alt.Axis(format=",.0f")),
-                  color=alt.Color("Label:N", title="Component",
-                                  scale=alt.Scale(domain=legend_domain_nom, range=legend_range_nom)),
-                  strokeWidth=alt.value(LINE_W),
-              )
-        )
-
-    st.altair_chart(layers.properties(height=320, title="Nominal"), use_container_width=True)
-
-    # ---------- REAL (today’s dollars) ----------
-    st.markdown("### Cashflow: CPF LIFE + OA Withdrawal (Real, in Today’s Dollars)")
+    st.markdown("### Cashflow: CPF LIFE + OA / Cash / Investment Withdrawals (Real, in Today’s Dollars)")
 
     _today_year = date.today().year
     _snap["Deflator"] = (1.0 + float(inflation_pct)) ** (_snap["Year"] - _today_year).clip(lower=0)
 
     _real = _snap.copy()
-    _real["CPF"]  = _real["CPF_LIFE_monthly_payout"] / _real["Deflator"]
-    _real["OA_A"] = _real["OA_Withdrawal1_Paid"]      / _real["Deflator"]
-    _real["OA_B"] = _real["OA_Withdrawal2_Paid"]      / _real["Deflator"]
-    _real["Total"] = _real[["CPF", "OA_A", "OA_B"]].sum(axis=1)
+    for s in [c for c in series_order if c != "Total" and present_flags.get(c, False)]:
+        _real[s] = _real[s] / _real["Deflator"]
+    _real["Total"] = _real[[s for s in _cols_for_total]].sum(axis=1) if _cols_for_total else 0.0
 
-    value_vars_real = ["Total", "CPF"] + (["OA_A"] if oaA_present else []) + (["OA_B"] if oaB_present else [])
     _real_long = pd.melt(
         _real,
         id_vars=["Year", "YearAge"],
-        value_vars=value_vars_real,
+        value_vars=[s for s in series_order if present_flags.get(s, False)],
         var_name="Series",
         value_name="Amount",
     )
-
-    label_map_real = {
-        "Total": "Total (monthly, real)",
-        "CPF":   "CPF LIFE (monthly, real)",
-        "OA_A":  "OA A (monthly, real)",
-        "OA_B":  "OA B (monthly, real)",
-    }
+    label_map_real = {k: v.replace("(monthly)", "(monthly, real)") for k, v in label_map_nom.items()}
     _real_long["Label"] = _real_long["Series"].map(label_map_real)
 
-    legend_domain_real = [label_map_real[s] for s in value_vars_real]
-    color_map_real = {"Total": COLOR_TOTAL, "CPF": COLOR_CPF, "OA_A": COLOR_OA_A, "OA_B": COLOR_OA_B}
-    legend_range_real = [color_map_real[s] for s in value_vars_real]
+    legend_domain_real = [label_map_real[s] for s in _real_long["Series"].unique().tolist()]
+    legend_range_real  = [color_map_nom[s] for s in _real_long["Series"].unique().tolist()]
 
     real_total_area = (
         alt.Chart(_real_long[_real_long["Series"] == "Total"])
@@ -2341,7 +2803,6 @@ with tab_cash:
               color=alt.value(COLOR_TOTAL),
           )
     )
-
     real_total_line = (
         alt.Chart(_real_long[_real_long["Series"] == "Total"])
           .mark_line(point=True)
@@ -2353,9 +2814,8 @@ with tab_cash:
               strokeWidth=alt.value(LINE_W),
           )
     )
-
-    real_cpf_line = (
-        alt.Chart(_real_long[_real_long["Series"] == "CPF"])
+    real_others = (
+        alt.Chart(_real_long[_real_long["Series"] != "Total"])
           .mark_line(point=True, strokeDash=[4, 2])
           .encode(
               x=base_x,
@@ -2366,35 +2826,51 @@ with tab_cash:
           )
     )
 
-    real_layers = real_total_area + real_total_line + real_cpf_line
+    st.altair_chart((real_total_area + real_total_line + real_others).properties(height=320, title="Real"),
+                    use_container_width=True)
 
-    if oaA_present:
-        real_layers = real_layers + (
-            alt.Chart(_real_long[_real_long["Series"] == "OA_A"])
-              .mark_line(point=True, strokeDash=[4, 2])
-              .encode(
-                  x=base_x,
-                  y=alt.Y("Amount:Q", title="Amount (S$, today’s $)", axis=alt.Axis(format=",.0f")),
-                  color=alt.Color("Label:N", title="Component",
-                                  scale=alt.Scale(domain=legend_domain_real, range=legend_range_real)),
-                  strokeWidth=alt.value(LINE_W),
-              )
-        )
 
-    if oaB_present:
-        real_layers = real_layers + (
-            alt.Chart(_real_long[_real_long["Series"] == "OA_B"])
-              .mark_line(point=True, strokeDash=[4, 2])
-              .encode(
-                  x=base_x,
-                  y=alt.Y("Amount:Q", title="Amount (S$, today’s $)", axis=alt.Axis(format=",.0f")),
-                  color=alt.Color("Label:N", title="Component",
-                                  scale=alt.Scale(domain=legend_domain_real, range=legend_range_real)),
-                  strokeWidth=alt.value(LINE_W),
-              )
-        )
+   # --- Cashflow Tables (Nominal & Real) -------------------
+    st.markdown("### Cashflow Tables")
 
-    st.altair_chart(real_layers.properties(height=320, title="Real"), use_container_width=True)
+    def _make_cashflow_table(df, age_map):
+        """Return a neat table with Year (Age), components, and Total."""
+        cols = ["CPF", "OA_A", "OA_B", "Cash_A", "Cash_B", "Inv_A", "Inv_B"]
+        df = df.copy()
+        for c in cols:
+            if c not in df.columns:
+                df[c] = 0.0
+        df["Total"] = df[cols].sum(axis=1)
+        df["Year (Age)"] = df["Year"].map(lambda y: f"{int(y)} (Age {int(age_map.get(int(y), 0))})")
+        return df[["Year (Age)", "Year"] + cols + ["Total"]]
+
+    fmt_map = {
+        "CPF": "{:,.0f}", "OA_A": "{:,.0f}", "OA_B": "{:,.0f}",
+        "Cash_A": "{:,.0f}", "Cash_B": "{:,.0f}",
+        "Inv_A": "{:,.0f}", "Inv_B": "{:,.0f}",
+        "Total": "{:,.0f}",
+    }
+
+    # Nominal table (uses _snap created for the chart)
+    st.markdown("#### Cashflow (Monthly, Nominal)")
+    _nom_tbl_src = _snap[["Year", "CPF", "OA_A", "OA_B", "Cash_A", "Cash_B", "Inv_A", "Inv_B"]].copy()
+    _nom_tbl = _make_cashflow_table(_nom_tbl_src, _age_by_year)
+    st.dataframe(
+        _nom_tbl.style.format(fmt_map),
+        use_container_width=True,
+        height=280
+    )
+
+    # Real table (uses _real created for the chart — already deflated)
+    st.markdown("#### Cashflow (Monthly, Real — today’s $)")
+    _real_tbl_src = _real[["Year", "CPF", "OA_A", "OA_B", "Cash_A", "Cash_B", "Inv_A", "Inv_B"]].copy()
+    _real_tbl = _make_cashflow_table(_real_tbl_src, _age_by_year)
+    st.dataframe(
+        _real_tbl.style.format(fmt_map),
+        use_container_width=True,
+        height=280
+    )
+     
 
 # ============= TAB 4: Health Insurance =============
 with tab_health:
@@ -2548,6 +3024,144 @@ with tab_health:
                     use_container_width=True, height=160
                 )
 
+    # =============== IP premiums paid from OA — Yearly ===============
+    st.markdown("### IP Premiums Paid from OA")
+
+    # Prefer yearly_df rollups if present; otherwise derive from monthly_df
+    have_rollups = all(c in yearly_df.columns for c in ["IP_Base_OA_Annual", "IP_Rider_OA_Annual"])
+
+    if have_rollups:
+        _oa_yearly = yearly_df[["Year", "Age_end", "IP_Base_OA_Annual", "IP_Rider_OA_Annual"]].copy()
+    else:
+        # Derive from monthly_df
+        for col in ["IP_Base_OA_Paid", "IP_Rider_OA_Paid"]:
+            if col not in monthly_df.columns:
+                monthly_df[col] = 0.0
+        _oa_yearly = (
+            monthly_df.groupby("Year", as_index=False)[["IP_Base_OA_Paid","IP_Rider_OA_Paid"]]
+                      .sum()
+                      .rename(columns={"IP_Base_OA_Paid":"IP_Base_OA_Annual",
+                                       "IP_Rider_OA_Paid":"IP_Rider_OA_Annual"})
+        )
+        # add Age_end for nice labels
+        _age_end_map = yearly_df.set_index("Year")["Age_end"].to_dict()
+        _oa_yearly["Age_end"] = _oa_yearly["Year"].map(lambda y: int(_age_end_map.get(int(y), 0)))
+
+    # Label and melt
+    _oa_yearly["YearAge"] = _oa_yearly["Year"].map(lambda y: f"{int(y)} (Age {int(_oa_yearly.loc[_oa_yearly['Year']==y,'Age_end'].values[0])})")
+    _oa_long = _oa_yearly.melt(
+        id_vars=["Year", "Age_end", "YearAge"],
+        value_vars=["IP_Base_OA_Annual", "IP_Rider_OA_Annual"],
+        var_name="ComponentRaw", value_name="Amount"
+    )
+    name_map = {"IP_Base_OA_Annual": "Base from OA", "IP_Rider_OA_Annual": "Rider from OA"}
+    order_map = {"Base from OA": 0, "Rider from OA": 1}
+    _oa_long["Component"] = _oa_long["ComponentRaw"].map(name_map)
+    _oa_long["Order"] = _oa_long["Component"].map(order_map)
+
+    # Chart
+    ip_oa_annual_chart = (
+        alt.Chart(_oa_long)
+           .mark_bar()
+           .encode(
+               x=alt.X("YearAge:O", title="Year (Age)", sort=None, axis=alt.Axis(labelAngle=-40)),
+               y=alt.Y("sum(Amount):Q", title="Annual Amount (S$)", axis=alt.Axis(format=",.0f")),
+               color=alt.Color("Component:N", title="Component", scale=alt.Scale(domain=list(order_map.keys()))),
+               order=alt.Order("Order:Q"),
+               tooltip=[
+                   alt.Tooltip("Year:Q", title="Year"),
+                   alt.Tooltip("YearAge:N", title="Year (Age)"),
+                   alt.Tooltip("Component:N", title="Component"),
+                   alt.Tooltip("Amount:Q", title="Annual", format=",.0f"),
+               ],
+           )
+           .properties(height=300)
+    )
+    st.altair_chart(ip_oa_annual_chart, use_container_width=True)
+
+    # Table
+    st.markdown("#### Table — IP Premiums Paid from OA")
+    _tbl = _oa_yearly.copy()
+    _tbl["Base from OA"] = _tbl.pop("IP_Base_OA_Annual")
+    _tbl["Rider from OA"] = _tbl.pop("IP_Rider_OA_Annual")
+    _tbl["Total"] = _tbl["Base from OA"] + _tbl["Rider from OA"]
+    _tbl["Year (Age)"] = _tbl["YearAge"]
+    st.dataframe(
+        _tbl[["Year (Age)", "Year", "Base from OA", "Rider from OA", "Total"]]
+            .style.format({"Base from OA": "{:,.0f}", "Rider from OA": "{:,.0f}", "Total": "{:,.0f}"}),
+        use_container_width=True, height=260
+    )
+
+                
+with tab_nw:
+    st.markdown("### Net Worth (CPF + Cash + Investments)")
+
+    # Build a long df with 6 accounts
+    nw_long = yearly_df[["Year","Age_end"]].copy()
+    # Ensure columns exist (for older runs before adding cash/invest)
+    for col in ["End_OA","End_SA","End_MA","End_RA","End_Cash","End_Invest"]:
+        if col not in yearly_df.columns:
+            yearly_df[col] = 0.0
+    nw_long["OA"]     = yearly_df["End_OA"]
+    nw_long["SA"]     = yearly_df["End_SA"]
+    nw_long["MA"]     = yearly_df["End_MA"]
+    nw_long["RA"]     = yearly_df["End_RA"]
+    nw_long["Cash"]   = yearly_df["End_Cash"]
+    nw_long["Invest"] = yearly_df["End_Invest"]
+
+    nw_melt = nw_long.melt(
+        id_vars=["Year","Age_end"],
+        value_vars=["OA","SA","MA","RA","Cash","Invest"],
+        var_name="Account", value_name="Balance"
+    )
+    nw_melt["YearAge"] = nw_melt.apply(lambda r: f"{int(r['Year'])} (Age {int(r['Age_end'])})", axis=1)
+
+    # Stacked bars
+    nw_chart = alt.Chart(nw_melt).mark_bar().encode(
+        x=alt.X("YearAge:O", title="Year (Age)", sort=None, axis=alt.Axis(labelAngle=-40)),
+        y=alt.Y("sum(Balance):Q", title="Balance (S$)", axis=alt.Axis(format=",.0f")),
+        color=alt.Color("Account:N", title="Account"),
+        tooltip=[
+            alt.Tooltip("Year:Q", title="Year"),
+            alt.Tooltip("Age_end:Q", title="Age"),
+            alt.Tooltip("Account:N", title="Account"),
+            alt.Tooltip("Balance:Q", title="Balance", format=",.0f"),
+        ],
+    ).properties(height=360)
+    st.altair_chart(nw_chart, use_container_width=True)
+
+    # KPIs
+    end_row = yearly_df.sort_values("Year").iloc[-1]
+    total_final = (
+        float(end_row["End_OA"]) + float(end_row["End_SA"]) +
+        float(end_row["End_MA"]) + float(end_row["End_RA"]) +
+        float(end_row.get("End_Cash", 0.0)) + float(end_row.get("End_Invest", 0.0))
+    )
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(f'<div class="metric-card"><div class="small-muted">Total Net Worth (final)</div><div style="font-size:24px;font-weight:700;">${total_final:,.0f}</div></div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown(f'<div class="metric-card"><div class="small-muted">Cash (final)</div><div style="font-size:24px;font-weight:700;">${float(end_row.get("End_Cash",0.0)):,.0f}</div></div>', unsafe_allow_html=True)
+    with c3:
+        st.markdown(f'<div class="metric-card"><div class="small-muted">Investments (final)</div><div style="font-size:24px;font-weight:700;">${float(end_row.get("End_Invest",0.0)):,.0f}</div></div>', unsafe_allow_html=True)
+
+    # Table
+    st.markdown("### Net Worth Table")
+    _tbl = yearly_df.copy()
+    if "Total_Assets" not in _tbl.columns:
+        _tbl["Total_Assets"] = (
+            _tbl["End_OA"] + _tbl["End_SA"] + _tbl["End_MA"] + _tbl["End_RA"] +
+            _tbl.get("End_Cash", 0.0) + _tbl.get("End_Invest", 0.0)
+        )
+    _tbl["Year (Age)"] = _tbl.apply(lambda r: f"{int(r['Year'])} (Age {int(r['Age_end'])})", axis=1)
+    st.dataframe(
+        _tbl[["Year (Age)","End_OA","End_SA","End_MA","End_RA","End_Cash","End_Invest","Total_Assets"]]
+            .style.format({
+                "End_OA":"{:,.0f}","End_SA":"{:,.0f}","End_MA":"{:,.0f}","End_RA":"{:,.0f}",
+                "End_Cash":"{:,.0f}","End_Invest":"{:,.0f}","Total_Assets":"{:,.0f}",
+            }),
+        use_container_width=True, height=360
+    )
 
 # Notes
 notes_html = []
